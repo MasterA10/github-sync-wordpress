@@ -266,31 +266,40 @@ class GitHub_Sync {
         $target_dir       = wp_normalize_path( trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
         $temp_extract_dir = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
 
-        if ( $wp_filesystem->is_dir( $temp_extract_dir ) ) {
-            $wp_filesystem->delete( $temp_extract_dir, true );
+        // Clean previous extraction
+        if ( is_dir( $temp_extract_dir ) ) {
+            $this->delete_directory( $temp_extract_dir );
         }
-        $wp_filesystem->mkdir( $temp_extract_dir );
+        mkdir( $temp_extract_dir, 0755, true );
 
+        // Use native PHP ZipArchive for reliable extraction
         $this->log_event( "Extracting ZIP to: " . $temp_extract_dir, 'success' );
-        $unzipped = unzip_file( $temp_file, $temp_extract_dir );
+
+        $zip = new ZipArchive();
+        $open_result = $zip->open( $temp_file );
+        if ( $open_result !== true ) {
+            @unlink( $temp_file );
+            $this->log_event( "ZipArchive::open failed with code: " . $open_result, 'error' );
+            return new WP_Error( 'zip_open_error', 'Could not open ZIP file. Error code: ' . $open_result );
+        }
+
+        $this->log_event( "ZIP contains " . $zip->numFiles . " files. First entry: " . $zip->getNameIndex(0), 'success' );
+        $zip->extractTo( $temp_extract_dir );
+        $zip->close();
         @unlink( $temp_file );
 
-        if ( is_wp_error( $unzipped ) ) {
-            $this->log_event( "Extraction failed: " . $unzipped->get_error_message(), 'error' );
-            $wp_filesystem->delete( $temp_extract_dir, true );
-            return $unzipped;
-        }
+        // Use native PHP scandir to find extracted contents
+        $items = scandir( $temp_extract_dir );
+        $root_folder = '';
+        $item_names  = array();
 
-        // Find the root folder (GitHub zipballs always have one root dir like "user-repo-hash")
-        $extracted_items = $wp_filesystem->dirlist( $temp_extract_dir );
-        $root_folder     = '';
-        $item_names      = array();
-
-        if ( ! empty( $extracted_items ) ) {
-            foreach ( $extracted_items as $name => $item ) {
-                $item_names[] = $name . ' [' . ( $item['type'] === 'd' ? 'DIR' : 'FILE' ) . ']';
-                if ( $item['type'] === 'd' && empty( $root_folder ) ) {
-                    $root_folder = $name;
+        if ( $items ) {
+            foreach ( $items as $item ) {
+                if ( $item === '.' || $item === '..' ) continue;
+                $full_path    = $temp_extract_dir . '/' . $item;
+                $item_names[] = $item . ' [' . ( is_dir( $full_path ) ? 'DIR' : 'FILE' ) . ']';
+                if ( is_dir( $full_path ) && empty( $root_folder ) ) {
+                    $root_folder = $item;
                 }
             }
         }
@@ -298,21 +307,16 @@ class GitHub_Sync {
         $this->log_event( "Extracted contents: " . ( ! empty( $item_names ) ? implode( ', ', $item_names ) : 'EMPTY' ), 'success' );
 
         if ( $root_folder ) {
-            $source_path = wp_normalize_path( trailingslashit( $temp_extract_dir ) . $root_folder );
+            $source_path = $temp_extract_dir . '/' . $root_folder;
             $this->log_event( "Root folder: " . $root_folder . " — copying to " . $target_dir, 'success' );
 
-            if ( $wp_filesystem->is_dir( $target_dir ) ) {
-                $wp_filesystem->delete( $target_dir, true );
+            // Remove existing target and copy
+            if ( is_dir( $target_dir ) ) {
+                $this->delete_directory( $target_dir );
             }
 
-            $wp_filesystem->mkdir( $target_dir );
-            $copied = copy_dir( $source_path, $target_dir );
-            $wp_filesystem->delete( $temp_extract_dir, true );
-
-            if ( is_wp_error( $copied ) ) {
-                $this->log_event( "Copy failed: " . $copied->get_error_message(), 'error' );
-                return $copied;
-            }
+            $this->recurse_copy( $source_path, $target_dir );
+            $this->delete_directory( $temp_extract_dir );
 
             $this->log_event( "Synchronized " . $repo['url'] . " → " . $repo['folder'] . " ✓", 'success' );
             return true;
@@ -320,9 +324,48 @@ class GitHub_Sync {
 
         $found_info = ! empty( $item_names ) ? "Found: " . implode( ', ', $item_names ) : "Directory is empty.";
         $this->log_event( "Could not find root folder. " . $found_info, 'error' );
-        $wp_filesystem->delete( $temp_extract_dir, true );
+        $this->delete_directory( $temp_extract_dir );
 
         return new WP_Error( 'extract_error', 'Could not find extracted folder structure.' );
+    }
+
+    /**
+     * Recursively copy a directory.
+     */
+    private function recurse_copy( $src, $dst ) {
+        $dir = opendir( $src );
+        if ( ! is_dir( $dst ) ) {
+            mkdir( $dst, 0755, true );
+        }
+        while ( false !== ( $file = readdir( $dir ) ) ) {
+            if ( $file === '.' || $file === '..' ) continue;
+            $src_path = $src . '/' . $file;
+            $dst_path = $dst . '/' . $file;
+            if ( is_dir( $src_path ) ) {
+                $this->recurse_copy( $src_path, $dst_path );
+            } else {
+                copy( $src_path, $dst_path );
+            }
+        }
+        closedir( $dir );
+    }
+
+    /**
+     * Recursively delete a directory.
+     */
+    private function delete_directory( $dir ) {
+        if ( ! is_dir( $dir ) ) return;
+        $items = scandir( $dir );
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) continue;
+            $path = $dir . '/' . $item;
+            if ( is_dir( $path ) ) {
+                $this->delete_directory( $path );
+            } else {
+                unlink( $path );
+            }
+        }
+        rmdir( $dir );
     }
 
     public function run_auto_sync( $id ) {
