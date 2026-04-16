@@ -200,49 +200,70 @@ class GitHub_Sync {
         $parsed_url = parse_url( $repo['url'] );
         $path       = trim( $parsed_url['path'], '/' );
         $zip_url    = "https://api.github.com/repos/{$path}/zipball/" . $repo['branch'];
-        
+
+        // Create temp file FIRST, then stream the download directly to it
+        $temp_file = wp_tempnam( 'github_sync_' );
+
         $args = array(
-            'timeout' => 300,
-            'headers' => array(
-                'Accept' => 'application/vnd.github.v3+json',
-                'User-Agent' => 'WordPress/GitHub-Sync'
-            )
+            'timeout'     => 300,
+            'redirection' => 5,
+            'stream'      => true,
+            'filename'    => $temp_file,
+            'headers'     => array(
+                'Accept'     => 'application/vnd.github+json',
+                'User-Agent' => 'WordPress/GitHub-Sync',
+            ),
         );
 
         if ( ! empty( $repo['token'] ) ) {
-            $args['headers']['Authorization'] = 'token ' . $repo['token'];
+            $args['headers']['Authorization'] = 'Bearer ' . $repo['token'];
         }
 
+        $this->log_event( "Downloading ZIP from: " . $zip_url, 'success' );
         $response = wp_remote_get( $zip_url, $args );
+
         if ( is_wp_error( $response ) ) {
+            @unlink( $temp_file );
             $this->log_event( "Download failed for " . $repo['url'] . ": " . $response->get_error_message(), 'error' );
             return $response;
         }
 
         $response_code = wp_remote_retrieve_response_code( $response );
         if ( $response_code !== 200 ) {
+            @unlink( $temp_file );
             $this->log_event( "Download failed for " . $repo['url'] . ": HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ), 'error' );
             return new WP_Error( 'http_error', "HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ) );
         }
 
+        // Validate the downloaded file
+        $file_size = filesize( $temp_file );
+        $this->log_event( "Download successful. File size: " . size_format( $file_size ), 'success' );
+
+        if ( $file_size < 100 ) {
+            @unlink( $temp_file );
+            $this->log_event( "Downloaded file is too small (" . $file_size . " bytes). Repository may be empty or token may be invalid.", 'error' );
+            return new WP_Error( 'empty_zip', 'Downloaded file is too small.' );
+        }
+
+        // Validate ZIP magic bytes (PK header)
+        $fh = fopen( $temp_file, 'rb' );
+        $magic = fread( $fh, 4 );
+        fclose( $fh );
+        if ( substr( $magic, 0, 2 ) !== 'PK' ) {
+            $body_preview = file_get_contents( $temp_file, false, null, 0, 200 );
+            @unlink( $temp_file );
+            $this->log_event( "Downloaded file is NOT a valid ZIP. Content preview: " . substr( $body_preview, 0, 150 ), 'error' );
+            return new WP_Error( 'invalid_zip', 'Downloaded file is not a valid ZIP archive.' );
+        }
+
+        // Initialize Filesystem
         global $wp_filesystem;
         if ( ! WP_Filesystem() ) {
-            return new WP_Error( 'filesystem_error', 'Could not initialize session for directory extraction.' );
+            @unlink( $temp_file );
+            return new WP_Error( 'filesystem_error', 'Could not initialize WP_Filesystem.' );
         }
 
-        $body = wp_remote_retrieve_body( $response );
-        $size = strlen( $body );
-        $this->log_event( "Download successful. ZIP size: " . $size . " bytes", 'success' );
-
-        if ( $size < 100 ) {
-            $this->log_event( "ZIP body is too small. Repository might be empty or restricted.", 'error' );
-            return new WP_Error( 'empty_zip', 'ZIP body is too small.' );
-        }
-
-        $temp_file = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_zip_' . $id . '.zip' );
-        $wp_filesystem->put_contents( $temp_file, $body );
-        
-        $target_dir = wp_normalize_path( trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
+        $target_dir       = wp_normalize_path( trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
         $temp_extract_dir = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
 
         if ( $wp_filesystem->is_dir( $temp_extract_dir ) ) {
@@ -250,46 +271,56 @@ class GitHub_Sync {
         }
         $wp_filesystem->mkdir( $temp_extract_dir );
 
-        $this->log_event( "Extracting to: " . $temp_extract_dir, 'success' );
+        $this->log_event( "Extracting ZIP to: " . $temp_extract_dir, 'success' );
         $unzipped = unzip_file( $temp_file, $temp_extract_dir );
         @unlink( $temp_file );
 
         if ( is_wp_error( $unzipped ) ) {
-            $this->log_event( "Extraction failed for " . $repo['url'] . ": " . $unzipped->get_error_message(), 'error' );
+            $this->log_event( "Extraction failed: " . $unzipped->get_error_message(), 'error' );
+            $wp_filesystem->delete( $temp_extract_dir, true );
             return $unzipped;
         }
 
+        // Find the root folder (GitHub zipballs always have one root dir like "user-repo-hash")
         $extracted_items = $wp_filesystem->dirlist( $temp_extract_dir );
-        $root_folder = '';
-        $item_names = array();
+        $root_folder     = '';
+        $item_names      = array();
 
         if ( ! empty( $extracted_items ) ) {
             foreach ( $extracted_items as $name => $item ) {
-                $item_names[] = $name . " [" . ( $item['type'] === 'd' ? 'DIR' : 'FILE' ) . "]";
+                $item_names[] = $name . ' [' . ( $item['type'] === 'd' ? 'DIR' : 'FILE' ) . ']';
                 if ( $item['type'] === 'd' && empty( $root_folder ) ) {
                     $root_folder = $name;
                 }
             }
         }
 
+        $this->log_event( "Extracted contents: " . ( ! empty( $item_names ) ? implode( ', ', $item_names ) : 'EMPTY' ), 'success' );
+
         if ( $root_folder ) {
             $source_path = wp_normalize_path( trailingslashit( $temp_extract_dir ) . $root_folder );
-            $this->log_event( "Root folder detected: " . $root_folder . ". Copying items...", 'success' );
-            
+            $this->log_event( "Root folder: " . $root_folder . " — copying to " . $target_dir, 'success' );
+
             if ( $wp_filesystem->is_dir( $target_dir ) ) {
                 $wp_filesystem->delete( $target_dir, true );
             }
-            
+
             $wp_filesystem->mkdir( $target_dir );
-            copy_dir( $source_path, $target_dir );
+            $copied = copy_dir( $source_path, $target_dir );
             $wp_filesystem->delete( $temp_extract_dir, true );
-            
-            $this->log_event( "Synchronized " . $repo['url'] . " successfully to " . $repo['folder'], 'success' );
+
+            if ( is_wp_error( $copied ) ) {
+                $this->log_event( "Copy failed: " . $copied->get_error_message(), 'error' );
+                return $copied;
+            }
+
+            $this->log_event( "Synchronized " . $repo['url'] . " → " . $repo['folder'] . " ✓", 'success' );
             return true;
-        } else {
-            $found_info = ! empty( $item_names ) ? "Found: " . implode( ', ', $item_names ) : "Directory is empty.";
-            $this->log_event( "Could not find root folder structure. " . $found_info, 'error' );
         }
+
+        $found_info = ! empty( $item_names ) ? "Found: " . implode( ', ', $item_names ) : "Directory is empty.";
+        $this->log_event( "Could not find root folder. " . $found_info, 'error' );
+        $wp_filesystem->delete( $temp_extract_dir, true );
 
         return new WP_Error( 'extract_error', 'Could not find extracted folder structure.' );
     }
