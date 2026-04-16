@@ -264,8 +264,8 @@ class GitHub_Sync {
             return new WP_Error( 'filesystem_error', 'Could not initialize WP_Filesystem.' );
         }
 
-        $target_dir       = wp_normalize_path( trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
-        $temp_extract_dir = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
+        $target_dir       = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
+        $temp_extract_dir = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
 
         // Clean previous extraction
         if ( is_dir( $temp_extract_dir ) ) {
@@ -285,9 +285,16 @@ class GitHub_Sync {
         }
 
         $this->log_event( "ZIP contains " . $zip->numFiles . " files. First entry: " . $zip->getNameIndex(0), 'success' );
-        $zip->extractTo( $temp_extract_dir );
+        
+        $extracted = $zip->extractTo( $temp_extract_dir );
+        $status    = $zip->getStatusString();
         $zip->close();
         @unlink( $temp_file );
+
+        if ( ! $extracted ) {
+            $this->log_event( "ZipArchive::extractTo failed. Status: " . $status, 'error' );
+            return new WP_Error( 'zip_extract_error', 'Could not extract ZIP file. Status: ' . $status );
+        }
 
         // Use native PHP scandir to find extracted contents
         $items = scandir( $temp_extract_dir );
@@ -297,7 +304,7 @@ class GitHub_Sync {
         if ( $items ) {
             foreach ( $items as $item ) {
                 if ( $item === '.' || $item === '..' ) continue;
-                $full_path    = $temp_extract_dir . '/' . $item;
+                $full_path    = $temp_extract_dir . DIRECTORY_SEPARATOR . $item;
                 $item_names[] = $item . ' [' . ( is_dir( $full_path ) ? 'DIR' : 'FILE' ) . ']';
                 if ( is_dir( $full_path ) && empty( $root_folder ) ) {
                     $root_folder = $item;
