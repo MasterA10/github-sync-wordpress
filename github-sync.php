@@ -230,6 +230,8 @@ class GitHub_Sync {
             return new WP_Error( 'filesystem_error', 'Could not initialize session for directory extraction.' );
         }
         
+        global $wp_filesystem;
+        
         $temp_file = trailingslashit( get_temp_dir() ) . 'github_sync_zip_' . $id . '.zip';
         $wp_filesystem->put_contents( $temp_file, wp_remote_retrieve_body( $response ) );
         
