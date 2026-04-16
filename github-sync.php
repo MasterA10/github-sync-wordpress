@@ -201,14 +201,20 @@ class GitHub_Sync {
         $path       = trim( $parsed_url['path'], '/' );
         $zip_url    = "https://api.github.com/repos/{$path}/zipball/" . $repo['branch'];
 
-        // Create temp file FIRST, then stream the download directly to it
-        $temp_file = wp_tempnam( 'github_sync_' );
+        $upload_dir = wp_upload_dir();
+        $base_temp  = trailingslashit( $upload_dir['basedir'] ) . 'github-sync-temp';
+        
+        if ( ! is_dir( $base_temp ) ) {
+            mkdir( $base_temp, 0755, true );
+        }
+
+        $temp_file        = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $base_temp . DIRECTORY_SEPARATOR . 'sync_' . $id . '.zip' );
+        $temp_extract_dir = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $base_temp . DIRECTORY_SEPARATOR . 'extract_' . $id );
+        $target_dir       = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
 
         $args = array(
             'timeout'     => 300,
             'redirection' => 5,
-            'stream'      => true,
-            'filename'    => $temp_file,
             'headers'     => array(
                 'Accept'               => 'application/vnd.github+json',
                 'User-Agent'           => 'WordPress/GitHub-Sync',
@@ -224,50 +230,45 @@ class GitHub_Sync {
         $response = wp_remote_get( $zip_url, $args );
 
         if ( is_wp_error( $response ) ) {
-            @unlink( $temp_file );
-            $this->log_event( "Download failed for " . $repo['url'] . ": " . $response->get_error_message(), 'error' );
+            $this->log_event( "Download failed: " . $response->get_error_message(), 'error' );
             return $response;
         }
 
         $response_code = wp_remote_retrieve_response_code( $response );
         if ( $response_code !== 200 ) {
-            @unlink( $temp_file );
-            $this->log_event( "Download failed for " . $repo['url'] . ": HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ), 'error' );
-            return new WP_Error( 'http_error', "HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ) );
-        }
-
-        // Validate the downloaded file
-        $file_size = filesize( $temp_file );
-        $this->log_event( "Download successful. File size: " . size_format( $file_size ), 'success' );
-
-        if ( $file_size < 100 ) {
-            @unlink( $temp_file );
-            $this->log_event( "Downloaded file is too small (" . $file_size . " bytes). Repository may be empty or token may be invalid.", 'error' );
-            return new WP_Error( 'empty_zip', 'Downloaded file is too small.' );
-        }
-
-        // Validate ZIP magic bytes (PK header)
-        $fh = fopen( $temp_file, 'rb' );
-        $magic = fread( $fh, 4 );
-        fclose( $fh );
-        if ( substr( $magic, 0, 2 ) !== 'PK' ) {
-            $body_preview = file_get_contents( $temp_file, false, null, 0, 200 );
-            @unlink( $temp_file );
-            $this->log_event( "Downloaded file is NOT a valid ZIP. Content preview: " . substr( $body_preview, 0, 150 ), 'error' );
-            return new WP_Error( 'invalid_zip', 'Downloaded file is not a valid ZIP archive.' );
+            $this->log_event( "Download failed: HTTP " . $response_code, 'error' );
+            return new WP_Error( 'http_error', "HTTP " . $response_code );
         }
 
         // Initialize Filesystem
         global $wp_filesystem;
         if ( ! WP_Filesystem() ) {
-            @unlink( $temp_file );
             return new WP_Error( 'filesystem_error', 'Could not initialize WP_Filesystem.' );
         }
 
-        $target_dir       = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
-        $temp_extract_dir = str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
+        $body = wp_remote_retrieve_body( $response );
+        $size = strlen( $body );
+        $this->log_event( "Download successful. ZIP size: " . size_format( $size ), 'success' );
 
-        // Clean previous extraction
+        if ( $size < 100 ) {
+            return new WP_Error( 'empty_zip', 'Downloaded file is too small.' );
+        }
+
+        // Save ZIP using native file_put_contents for binary safety
+        file_put_contents( $temp_file, $body );
+        
+        // Validate ZIP magic bytes (PK header)
+        $fh = fopen( $temp_file, 'rb' );
+        $magic = fread( $fh, 4 );
+        fclose( $fh );
+        if ( substr( $magic, 0, 2 ) !== 'PK' ) {
+            $body_preview = substr( $body, 0, 200 );
+            @unlink( $temp_file );
+            $this->log_event( "Downloaded file is NOT a valid ZIP. Content preview: " . $body_preview, 'error' );
+            return new WP_Error( 'invalid_zip', 'Downloaded file is not a valid ZIP archive.' );
+        }
+
+        // Clean and prepare extraction directory
         if ( is_dir( $temp_extract_dir ) ) {
             $this->delete_directory( $temp_extract_dir );
         }
