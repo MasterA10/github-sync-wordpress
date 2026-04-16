@@ -42,7 +42,7 @@ class GitHub_Sync {
     }
 
     public function register_settings() {
-        register_setting( 'github_sync_group', $this. $this->option_name );
+        register_setting( 'github_sync_group', $this->option_name );
     }
 
     public function render_admin_page() {
@@ -213,16 +213,27 @@ class GitHub_Sync {
             $args['headers']['Authorization'] = 'token ' . $repo['token'];
         }
 
-        $temp_file = download_url( $zip_url, 300, false );
-        if ( is_wp_error( $temp_file ) ) {
-            $this->log_event( "Download failed for " . $repo['url'] . ": " . $temp_file->get_error_message(), 'error' );
-            return $temp_file;
+        $response = wp_remote_get( $zip_url, $args );
+        if ( is_wp_error( $response ) ) {
+            $this->log_event( "Download failed for " . $repo['url'] . ": " . $response->get_error_message(), 'error' );
+            return $response;
+        }
+
+        $response_code = wp_remote_retrieve_response_code( $response );
+        if ( $response_code !== 200 ) {
+            $this->log_event( "Download failed for " . $repo['url'] . ": HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ), 'error' );
+            return new WP_Error( 'http_error', "HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ) );
         }
 
         // Initialize Filesystem
         if ( ! WP_Filesystem() ) {
             return new WP_Error( 'filesystem_error', 'Could not initialize session for directory extraction.' );
         }
+        
+        global $wp_filesystem;
+
+        $temp_file = get_temp_dir() . 'github_sync_zip_' . $id . '.zip';
+        $wp_filesystem->put_contents( $temp_file, wp_remote_retrieve_body( $response ) );
         
         global $wp_filesystem;
 
