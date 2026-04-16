@@ -210,8 +210,9 @@ class GitHub_Sync {
             'stream'      => true,
             'filename'    => $temp_file,
             'headers'     => array(
-                'Accept'     => 'application/vnd.github+json',
-                'User-Agent' => 'WordPress/GitHub-Sync',
+                'Accept'               => 'application/vnd.github+json',
+                'User-Agent'           => 'WordPress/GitHub-Sync',
+                'X-GitHub-Api-Version' => '2022-11-28',
             ),
         );
 
