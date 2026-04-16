@@ -230,16 +230,12 @@ class GitHub_Sync {
             return new WP_Error( 'filesystem_error', 'Could not initialize session for directory extraction.' );
         }
         
-        global $wp_filesystem;
-
-        $temp_file = get_temp_dir() . 'github_sync_zip_' . $id . '.zip';
+        $temp_file = trailingslashit( get_temp_dir() ) . 'github_sync_zip_' . $id . '.zip';
         $wp_filesystem->put_contents( $temp_file, wp_remote_retrieve_body( $response ) );
         
-        global $wp_filesystem;
-
-        $target_dir = WP_PLUGIN_DIR . '/' . $repo['folder'];
+        $target_dir = trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'];
         
-        $temp_extract_dir = get_temp_dir() . 'github_sync_' . $id;
+        $temp_extract_dir = trailingslashit( get_temp_dir() ) . 'github_sync_' . $id;
         if ( $wp_filesystem->is_dir( $temp_extract_dir ) ) {
             $wp_filesystem->delete( $temp_extract_dir, true );
         }
@@ -253,30 +249,36 @@ class GitHub_Sync {
             return $unzipped;
         }
 
-        $extracted_folders = $wp_filesystem->dirlist( $temp_extract_dir );
-        if ( ! empty( $extracted_folders ) ) {
-            $root_folder = '';
-            foreach ( $extracted_folders as $folder ) {
-                if ( $folder['type'] === 'd' ) {
-                    $root_folder = $folder['name'];
-                    break;
-                }
-            }
+        $extracted_items = $wp_filesystem->dirlist( $temp_extract_dir );
+        $root_folder = '';
+        $item_names = array();
 
-            if ( $root_folder ) {
-                $source_path = trailingslashit( $temp_extract_dir ) . $root_folder;
-                
-                if ( $wp_filesystem->is_dir( $target_dir ) ) {
-                    $wp_filesystem->delete( $target_dir, true );
+        if ( ! empty( $extracted_items ) ) {
+            foreach ( $extracted_items as $name => $item ) {
+                $item_names[] = $name . " [" . ( $item['type'] === 'd' ? 'DIR' : 'FILE' ) . "]";
+                // Use the first directory found as the root folder
+                if ( $item['type'] === 'd' && empty( $root_folder ) ) {
+                    $root_folder = $name;
                 }
-                
-                $wp_filesystem->mkdir( $target_dir );
-                copy_dir( $source_path, $target_dir );
-                $wp_filesystem->delete( $temp_extract_dir, true );
-                
-                $this->log_event( "Synchronized " . $repo['url'] . " to " . $repo['folder'], 'success' );
-                return true;
             }
+        }
+
+        if ( $root_folder ) {
+            $source_path = trailingslashit( $temp_extract_dir ) . $root_folder;
+            
+            if ( $wp_filesystem->is_dir( $target_dir ) ) {
+                $wp_filesystem->delete( $target_dir, true );
+            }
+            
+            $wp_filesystem->mkdir( $target_dir );
+            copy_dir( $source_path, $target_dir );
+            $wp_filesystem->delete( $temp_extract_dir, true );
+            
+            $this->log_event( "Synchronized " . $repo['url'] . " to " . $repo['folder'], 'success' );
+            return true;
+        } else {
+            $found_info = ! empty( $item_names ) ? "Found: " . implode( ', ', $item_names ) : "Directory is empty.";
+            $this->log_event( "Could not find root folder structure. " . $found_info, 'error' );
         }
 
         return new WP_Error( 'extract_error', 'Could not find extracted folder structure.' );
