@@ -225,24 +225,32 @@ class GitHub_Sync {
             return new WP_Error( 'http_error', "HTTP " . $response_code . " - " . wp_remote_retrieve_response_message( $response ) );
         }
 
-        // Initialize Filesystem
+        global $wp_filesystem;
         if ( ! WP_Filesystem() ) {
             return new WP_Error( 'filesystem_error', 'Could not initialize session for directory extraction.' );
         }
+
+        $body = wp_remote_retrieve_body( $response );
+        $size = strlen( $body );
+        $this->log_event( "Download successful. ZIP size: " . $size . " bytes", 'success' );
+
+        if ( $size < 100 ) {
+            $this->log_event( "ZIP body is too small. Repository might be empty or restricted.", 'error' );
+            return new WP_Error( 'empty_zip', 'ZIP body is too small.' );
+        }
+
+        $temp_file = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_zip_' . $id . '.zip' );
+        $wp_filesystem->put_contents( $temp_file, $body );
         
-        global $wp_filesystem;
-        
-        $temp_file = trailingslashit( get_temp_dir() ) . 'github_sync_zip_' . $id . '.zip';
-        $wp_filesystem->put_contents( $temp_file, wp_remote_retrieve_body( $response ) );
-        
-        $target_dir = trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'];
-        
-        $temp_extract_dir = trailingslashit( get_temp_dir() ) . 'github_sync_' . $id;
+        $target_dir = wp_normalize_path( trailingslashit( WP_PLUGIN_DIR ) . $repo['folder'] );
+        $temp_extract_dir = wp_normalize_path( trailingslashit( get_temp_dir() ) . 'github_sync_' . $id );
+
         if ( $wp_filesystem->is_dir( $temp_extract_dir ) ) {
             $wp_filesystem->delete( $temp_extract_dir, true );
         }
         $wp_filesystem->mkdir( $temp_extract_dir );
 
+        $this->log_event( "Extracting to: " . $temp_extract_dir, 'success' );
         $unzipped = unzip_file( $temp_file, $temp_extract_dir );
         @unlink( $temp_file );
 
@@ -258,7 +266,6 @@ class GitHub_Sync {
         if ( ! empty( $extracted_items ) ) {
             foreach ( $extracted_items as $name => $item ) {
                 $item_names[] = $name . " [" . ( $item['type'] === 'd' ? 'DIR' : 'FILE' ) . "]";
-                // Use the first directory found as the root folder
                 if ( $item['type'] === 'd' && empty( $root_folder ) ) {
                     $root_folder = $name;
                 }
@@ -266,7 +273,8 @@ class GitHub_Sync {
         }
 
         if ( $root_folder ) {
-            $source_path = trailingslashit( $temp_extract_dir ) . $root_folder;
+            $source_path = wp_normalize_path( trailingslashit( $temp_extract_dir ) . $root_folder );
+            $this->log_event( "Root folder detected: " . $root_folder . ". Copying items...", 'success' );
             
             if ( $wp_filesystem->is_dir( $target_dir ) ) {
                 $wp_filesystem->delete( $target_dir, true );
@@ -276,7 +284,7 @@ class GitHub_Sync {
             copy_dir( $source_path, $target_dir );
             $wp_filesystem->delete( $temp_extract_dir, true );
             
-            $this->log_event( "Synchronized " . $repo['url'] . " to " . $repo['folder'], 'success' );
+            $this->log_event( "Synchronized " . $repo['url'] . " successfully to " . $repo['folder'], 'success' );
             return true;
         } else {
             $found_info = ! empty( $item_names ) ? "Found: " . implode( ', ', $item_names ) : "Directory is empty.";
