@@ -21,6 +21,7 @@ class GitHub_Sync {
         add_action( 'admin_post_github_sync_action', array( $this, 'handle_sync_action' ) );
         add_action( 'github_sync_cron_event', array( $this, 'run_auto_sync' ) );
         add_action( 'admin_notices', array( $this, 'display_notices' ) );
+        add_action( 'init', array( $this, 'check_external_sync' ) );
     }
 
     public function add_cron_schedules( $schedules ) {
@@ -92,7 +93,10 @@ class GitHub_Sync {
                 </form>
             </div>
 
-            <h2 style="margin-top: 40px;">Synced Repositories</h2>
+            <h2 style="margin-top: 40px;">
+                Synced Repositories
+                <a href="<?php echo esc_url( admin_url( 'admin-post.php?action=github_sync_action&sync_task=sync_all&_wpnonce=' . wp_create_nonce( 'github_sync_nonce' ) ) ); ?>" class="button button-primary" style="margin-left: 15px;">Sync All Now</a>
+            </h2>
             <table class="wp-list-table widefat fixed striped">
                 <thead>
                     <tr>
@@ -122,6 +126,15 @@ class GitHub_Sync {
                     <?php endif; ?>
                 </tbody>
             </table>
+
+            <h2 style="margin-top: 40px;">Automation / External Link</h2>
+            <div class="card" style="max-width: 100%; padding: 20px;">
+                <p>Use the link below to synchronize all repositories without logging into WordPress. This is useful for external cron jobs or simple browser bookmarks.</p>
+                <code style="display: block; padding: 10px; background: #f0f0f0; border: 1px solid #ccc; margin-bottom: 10px; word-break: break-all;">
+                    <?php echo esc_url( home_url( '/?github_sync_action=sync_all_external&token=' . $this->get_external_sync_token() ) ); ?>
+                </code>
+                <p class="description">Keep this link private as it allows anyone to trigger a full synchronization.</p>
+            </div>
 
             <h2 style="margin-top: 40px;">Update Timeline</h2>
             <div class="card" style="max-width: 100%; height: 300px; overflow-y: scroll;">
@@ -187,6 +200,9 @@ class GitHub_Sync {
                     set_transient( 'github_sync_notice', array( 'type' => 'success', 'message' => 'Plugin synchronized successfully!' ), 30 );
                 }
             }
+        } elseif ( $task === 'sync_all' ) {
+            $count = $this->sync_all_repos();
+            set_transient( 'github_sync_notice', array( 'type' => 'success', 'message' => "All {$count} repositories synchronized successfully!" ), 30 );
         }
 
         wp_redirect( admin_url( 'options-general.php?page=github-sync' ) );
@@ -382,6 +398,41 @@ class GitHub_Sync {
         if ( isset( $repos[ $id ] ) ) {
             $this->sync_repo( $id, $repos[ $id ] );
         }
+    }
+
+    public function sync_all_repos() {
+        $repos = get_option( $this->option_name, array() );
+        $count = 0;
+        foreach ( $repos as $id => $repo ) {
+            $result = $this->sync_repo( $id, $repo );
+            if ( ! is_wp_error( $result ) ) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    public function check_external_sync() {
+        if ( isset( $_GET['github_sync_action'] ) && $_GET['github_sync_action'] === 'sync_all_external' ) {
+            $token = $this->get_external_sync_token();
+            $param_token = isset( $_GET['token'] ) ? $_GET['token'] : '';
+
+            if ( $param_token === $token ) {
+                $count = $this->sync_all_repos();
+                wp_die( "Success: {$count} repositories synchronized.", "GitHub Sync External", array( 'response' => 200 ) );
+            } else {
+                wp_die( "Unauthorized: Invalid token.", "GitHub Sync External", array( 'response' => 403 ) );
+            }
+        }
+    }
+
+    private function get_external_sync_token() {
+        $token = get_option( 'github_sync_external_token' );
+        if ( ! $token ) {
+            $token = wp_generate_password( 32, false );
+            update_option( 'github_sync_external_token', $token );
+        }
+        return $token;
     }
 
     private function log_event( $message, $status ) {
