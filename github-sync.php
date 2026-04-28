@@ -54,7 +54,7 @@ class GitHub_Sync {
         $repos = get_option( $this->option_name, array() );
         $logs  = get_option( $this->log_option_name, array() );
         $self_config = get_option( $this->self_option_name, array(
-            'url'    => '',
+            'url'    => 'https://github.com/MasterA10/github-sync-wordpress',
             'token'  => '',
             'branch' => 'main',
         ) );
