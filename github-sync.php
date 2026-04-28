@@ -14,6 +14,7 @@ class GitHub_Sync {
 
     private $option_name = 'github_sync_repos';
     private $log_option_name = 'github_sync_logs';
+    private $self_option_name = 'github_sync_self_config';
 
     public function __construct() {
         add_action( 'admin_menu', array( $this, 'add_admin_menu' ) );
@@ -52,6 +53,11 @@ class GitHub_Sync {
     public function render_admin_page() {
         $repos = get_option( $this->option_name, array() );
         $logs  = get_option( $this->log_option_name, array() );
+        $self_config = get_option( $this->self_option_name, array(
+            'url'    => '',
+            'token'  => '',
+            'branch' => 'main',
+        ) );
         ?>
         <div class="wrap">
             <h1>GitHub Sync</h1>
@@ -97,6 +103,45 @@ class GitHub_Sync {
                         </tr>
                     </table>
                     <?php submit_button( 'Add Repository' ); ?>
+                </form>
+            </div>
+
+            <div class="card" style="max-width: 100%; margin-top: 20px; padding: 20px; border-left: 4px solid #0073aa;">
+                <h2>Self-Update Configuration (GitHub Sync)</h2>
+                <p class="description">Configure the repository for <strong>this</strong> plugin to allow it to update itself.</p>
+                <form method="post" action="admin-post.php">
+                    <input type="hidden" name="action" value="github_sync_action">
+                    <input type="hidden" name="sync_task" value="save_self_config">
+                    <?php wp_nonce_field( 'github_sync_nonce' ); ?>
+                    
+                    <table class="form-table">
+                        <tr>
+                            <th><label for="self_repo_url">Plugin Repository URL</label></th>
+                            <td><input name="self_repo_url" type="url" id="self_repo_url" value="<?php echo esc_url( $self_config['url'] ); ?>" class="regular-text" placeholder="https://github.com/user/github-sync-wordpress"></td>
+                        </tr>
+                        <tr>
+                            <th><label for="self_repo_token">Personal Access Token (PAT)</label></th>
+                            <td>
+                                <div class="token-container" data-id="self_config">
+                                    <input name="self_repo_token" type="password" id="self_repo_token" value="<?php echo esc_attr( $self_config['token'] ); ?>" class="regular-text" placeholder="Optional for private repos">
+                                    <?php if ( ! empty( $self_config['token'] ) ) : ?>
+                                        <button type="button" class="button button-small reveal-token-btn" style="vertical-align: middle; margin-left: 5px;">View Current</button>
+                                        <span class="token-value" style="display: none; font-family: monospace; background: #f0f0f0; padding: 2px 5px; border-radius: 3px; vertical-align: middle; margin-left: 5px;"></span>
+                                    <?php endif; ?>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="self_repo_branch">Branch</label></th>
+                            <td><input name="self_repo_branch" type="text" id="self_repo_branch" value="<?php echo esc_attr( $self_config['branch'] ); ?>" class="small-text"></td>
+                        </tr>
+                    </table>
+                    <div style="margin-top: 15px;">
+                        <?php submit_button( 'Save Self-Update Config', 'secondary', 'save_self_config', false ); ?>
+                        <?php if ( ! empty( $self_config['url'] ) ) : ?>
+                            <a href="<?php echo esc_url( admin_url( 'admin-post.php?action=github_sync_action&sync_task=self_update&_wpnonce=' . wp_create_nonce( 'github_sync_nonce' ) ) ); ?>" class="button button-primary" style="margin-left: 10px;" onclick="return confirm('Update GitHub Sync now? This will replace the plugin files.')">Update GitHub Sync Now</a>
+                        <?php endif; ?>
+                    </div>
                 </form>
             </div>
 
@@ -226,6 +271,32 @@ class GitHub_Sync {
         } elseif ( $task === 'sync_all' ) {
             $count = $this->sync_all_repos();
             set_transient( 'github_sync_notice', array( 'type' => 'success', 'message' => "All {$count} repositories synchronized successfully!" ), 30 );
+        } elseif ( $task === 'save_self_config' ) {
+            $self_config = array(
+                'url'    => esc_url_raw( $_POST['self_repo_url'] ),
+                'token'  => sanitize_text_field( $_POST['self_repo_token'] ),
+                'branch' => sanitize_text_field( $_POST['self_repo_branch'] ) ?: 'main',
+            );
+            update_option( $this->self_option_name, $self_config );
+            set_transient( 'github_sync_notice', array( 'type' => 'success', 'message' => 'Self-update configuration saved.' ), 30 );
+        } elseif ( $task === 'self_update' ) {
+            $self_config = get_option( $this->self_option_name );
+            if ( ! empty( $self_config['url'] ) ) {
+                $plugin_folder = basename( dirname( __FILE__ ) );
+                $repo_data = array(
+                    'url'    => $self_config['url'],
+                    'token'  => $self_config['token'],
+                    'branch' => $self_config['branch'],
+                    'folder' => $plugin_folder,
+                );
+                
+                $result = $this->sync_repo( 'self', $repo_data );
+                if ( is_wp_error( $result ) ) {
+                    set_transient( 'github_sync_notice', array( 'type' => 'error', 'message' => 'Self-update failed: ' . $result->get_error_message() ), 30 );
+                } else {
+                    set_transient( 'github_sync_notice', array( 'type' => 'success', 'message' => 'GitHub Sync updated successfully!' ), 30 );
+                }
+            }
         }
 
         wp_redirect( admin_url( 'options-general.php?page=github-sync' ) );
@@ -607,6 +678,13 @@ class GitHub_Sync {
         $user = wp_get_current_user();
         if ( ! wp_check_password( $password, $user->data->user_pass, $user->ID ) ) {
             wp_send_json_error( array( 'message' => 'Senha incorreta.' ) );
+        }
+
+        if ( $repo_id === 'self_config' ) {
+            $self_config = get_option( $this->self_option_name );
+            if ( ! empty( $self_config['token'] ) ) {
+                wp_send_json_success( array( 'token' => $self_config['token'] ) );
+            }
         }
 
         $repos = get_option( $this->option_name, array() );
