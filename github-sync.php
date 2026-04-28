@@ -23,6 +23,8 @@ class GitHub_Sync {
         add_action( 'admin_notices', array( $this, 'display_notices' ) );
         add_action( 'init', array( $this, 'check_external_sync' ) );
         add_action( 'init', array( $this, 'check_webhook_sync' ) );
+        add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_scripts' ) );
+        add_action( 'wp_ajax_github_sync_reveal_token', array( $this, 'ajax_reveal_token' ) );
     }
 
     public function add_cron_schedules( $schedules ) {
@@ -109,13 +111,14 @@ class GitHub_Sync {
                         <th>Folder</th>
                         <th>Branch</th>
                         <th>Frequency</th>
+                        <th>Token</th>
                         <th>Webhook URL</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if ( empty( $repos ) ) : ?>
-                        <tr><td colspan="5">No repositories added yet.</td></tr>
+                        <tr><td colspan="7">No repositories added yet.</td></tr>
                     <?php else : ?>
                         <?php foreach ( $repos as $id => $repo ) : ?>
                             <tr>
@@ -123,6 +126,16 @@ class GitHub_Sync {
                                 <td><?php echo esc_html( $repo['folder'] ); ?></td>
                                 <td><?php echo esc_html( $repo['branch'] ); ?></td>
                                 <td><?php echo esc_html( $repo['frequency'] ); ?></td>
+                                <td>
+                                    <?php if ( ! empty( $repo['token'] ) ) : ?>
+                                        <div class="token-container" data-id="<?php echo esc_attr( $id ); ?>">
+                                            <span class="token-value" style="display: none; font-family: monospace; background: #f0f0f0; padding: 2px 5px; border-radius: 3px;"></span>
+                                            <button type="button" class="button button-small reveal-token-btn">View Token</button>
+                                        </div>
+                                    <?php else : ?>
+                                        <span class="description">No token</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <code style="font-size: 10px;"><?php echo esc_url( home_url( '/?github_sync_action=webhook&id=' . $id ) ); ?></code>
                                 </td>
@@ -538,6 +551,70 @@ class GitHub_Sync {
             </div>
             <?php
         }
+    }
+
+    public function enqueue_admin_scripts( $hook ) {
+        if ( 'settings_page_github-sync' !== $hook ) {
+            return;
+        }
+
+        wp_add_inline_script( 'jquery', '
+            jQuery(document).ready(function($) {
+                $(".reveal-token-btn").on("click", function() {
+                    var $btn = $(this);
+                    var $container = $btn.closest(".token-container");
+                    var $value = $container.find(".token-value");
+                    var repoId = $container.data("id");
+
+                    var password = prompt("Para ver o token, insira sua senha do WordPress:");
+                    if (!password) return;
+
+                    $btn.prop("disabled", true).text("Checking...");
+
+                    $.post(ajaxurl, {
+                        action: "github_sync_reveal_token",
+                        repo_id: repoId,
+                        password: password,
+                        _ajax_nonce: "' . wp_create_nonce( 'github_sync_reveal_nonce' ) . '"
+                    }, function(response) {
+                        if (response.success) {
+                            $value.text(response.data.token).show();
+                            $btn.hide();
+                        } else {
+                            alert(response.data.message || "Senha incorreta ou erro ao recuperar token.");
+                            $btn.prop("disabled", false).text("View Token");
+                        }
+                    });
+                });
+            });
+        ' );
+    }
+
+    public function ajax_reveal_token() {
+        check_ajax_referer( 'github_sync_reveal_nonce' );
+
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( array( 'message' => 'Unauthorized' ) );
+        }
+
+        $repo_id  = isset( $_POST['repo_id'] ) ? sanitize_text_field( $_POST['repo_id'] ) : '';
+        $password = isset( $_POST['password'] ) ? $_POST['password'] : '';
+
+        if ( empty( $repo_id ) || empty( $password ) ) {
+            wp_send_json_error( array( 'message' => 'Missing data' ) );
+        }
+
+        $user = wp_get_current_user();
+        if ( ! wp_check_password( $password, $user->data->user_pass, $user->ID ) ) {
+            wp_send_json_error( array( 'message' => 'Senha incorreta.' ) );
+        }
+
+        $repos = get_option( $this->option_name, array() );
+        if ( ! isset( $repos[ $repo_id ] ) || empty( $repos[ $repo_id ]['token'] ) ) {
+            wp_send_json_error( array( 'message' => 'Token não encontrado.' ) );
+        }
+
+        wp_send_json_success( array( 'token' => $repos[ $repo_id ]['token'] ) );
     }
 }
 
