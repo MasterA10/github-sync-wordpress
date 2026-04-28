@@ -22,6 +22,7 @@ class GitHub_Sync {
         add_action( 'github_sync_cron_event', array( $this, 'run_auto_sync' ) );
         add_action( 'admin_notices', array( $this, 'display_notices' ) );
         add_action( 'init', array( $this, 'check_external_sync' ) );
+        add_action( 'init', array( $this, 'check_webhook_sync' ) );
     }
 
     public function add_cron_schedules( $schedules ) {
@@ -78,6 +79,10 @@ class GitHub_Sync {
                             <td><input name="repo_folder" type="text" id="repo_folder" value="" class="regular-text" placeholder="Optional"></td>
                         </tr>
                         <tr>
+                            <th><label for="repo_secret">Webhook Secret</label></th>
+                            <td><input name="repo_secret" type="password" id="repo_secret" value="" class="regular-text" placeholder="Optional (for GitHub Webhooks)"></td>
+                        </tr>
+                        <tr>
                             <th><label for="sync_frequency">Sync Frequency</label></th>
                             <td>
                                 <select name="sync_frequency" id="sync_frequency">
@@ -104,6 +109,7 @@ class GitHub_Sync {
                         <th>Folder</th>
                         <th>Branch</th>
                         <th>Frequency</th>
+                        <th>Webhook URL</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -117,6 +123,9 @@ class GitHub_Sync {
                                 <td><?php echo esc_html( $repo['folder'] ); ?></td>
                                 <td><?php echo esc_html( $repo['branch'] ); ?></td>
                                 <td><?php echo esc_html( $repo['frequency'] ); ?></td>
+                                <td>
+                                    <code style="font-size: 10px;"><?php echo esc_url( home_url( '/?github_sync_action=webhook&id=' . $id ) ); ?></code>
+                                </td>
                                 <td>
                                     <a href="<?php echo esc_url( admin_url( 'admin-post.php?action=github_sync_action&sync_task=sync_now&id=' . $id . '&_wpnonce=' . wp_create_nonce( 'github_sync_nonce' ) ) ); ?>" class="button button-small">Sync Now</a>
                                     <a href="<?php echo esc_url( admin_url( 'admin-post.php?action=github_sync_action&sync_task=delete_repo&id=' . $id . '&_wpnonce=' . wp_create_nonce( 'github_sync_nonce' ) ) ); ?>" class="button button-small button-link-delete" onclick="return confirm('Remove this repo?')">Delete</a>
@@ -176,6 +185,7 @@ class GitHub_Sync {
                 'branch'    => sanitize_text_field( $_POST['repo_branch'] ),
                 'folder'    => sanitize_text_field( $_POST['repo_folder'] ) ?: basename( $_POST['repo_url'] ),
                 'frequency' => sanitize_text_field( $_POST['sync_frequency'] ),
+                'secret'    => sanitize_text_field( $_POST['repo_secret'] ),
             );
             update_option( $this->option_name, $repos );
             $this->log_event( "Added repository: " . $repos[ $id ]['url'], 'success' );
@@ -433,6 +443,75 @@ class GitHub_Sync {
             update_option( 'github_sync_external_token', $token );
         }
         return $token;
+    }
+
+    public function check_webhook_sync() {
+        if ( ! isset( $_GET['github_sync_action'] ) || $_GET['github_sync_action'] !== 'webhook' ) {
+            return;
+        }
+
+        $id = isset( $_GET['id'] ) ? $_GET['id'] : '';
+        $repos = get_option( $this->option_name, array() );
+
+        if ( ! isset( $repos[ $id ] ) ) {
+            wp_die( "Invalid Repository ID.", "GitHub Sync Webhook", array( 'response' => 404 ) );
+        }
+
+        $repo = $repos[ $id ];
+        $payload = file_get_contents( 'php://input' );
+
+        // 1. Verify Signature (if secret is set)
+        if ( ! empty( $repo['secret'] ) ) {
+            $header = isset( $_SERVER['HTTP_X_HUB_SIGNATURE_256'] ) ? $_SERVER['HTTP_X_HUB_SIGNATURE_256'] : '';
+            if ( ! $this->verify_webhook_signature( $payload, $header, $repo['secret'] ) ) {
+                $this->log_event( "Webhook signature verification failed for " . $repo['url'], 'error' );
+                wp_die( "Invalid Signature.", "GitHub Sync Webhook", array( 'response' => 403 ) );
+            }
+        }
+
+        // 2. Parse Payload
+        $data = json_decode( $payload, true );
+        
+        // 3. Verify it's a 'push' event (GitHub sends X-GitHub-Event header)
+        $event = isset( $_SERVER['HTTP_X_GITHUB_EVENT'] ) ? $_SERVER['HTTP_X_GITHUB_EVENT'] : '';
+        
+        // Ping event is sent by GitHub when the webhook is created
+        if ( $event === 'ping' ) {
+            wp_die( "Ping received. Webhook is active!", "GitHub Sync Webhook", array( 'response' => 200 ) );
+        }
+
+        if ( $event !== 'push' ) {
+            wp_die( "Event '{$event}' ignored.", "GitHub Sync Webhook", array( 'response' => 200 ) );
+        }
+
+        if ( ! $data ) {
+            wp_die( "Invalid Payload.", "GitHub Sync Webhook", array( 'response' => 400 ) );
+        }
+
+        // 4. Trigger Sync
+        $this->log_event( "Webhook received for " . $repo['url'] . " — triggering sync.", 'success' );
+        $result = $this->sync_repo( $id, $repo );
+
+        if ( is_wp_error( $result ) ) {
+            wp_die( "Sync failed: " . $result->get_error_message(), "GitHub Sync Webhook", array( 'response' => 500 ) );
+        }
+
+        wp_die( "Sync successful.", "GitHub Sync Webhook", array( 'response' => 200 ) );
+    }
+
+    private function verify_webhook_signature( $payload, $header, $secret ) {
+        if ( empty( $header ) ) return false;
+
+        $split = explode( '=', $header );
+        if ( count( $split ) !== 2 ) return false;
+
+        $algo = $split[0];
+        $signature = $split[1];
+
+        if ( $algo !== 'sha256' ) return false;
+
+        $expected = hash_hmac( 'sha256', $payload, $secret );
+        return hash_equals( $expected, $signature );
     }
 
     private function log_event( $message, $status ) {
